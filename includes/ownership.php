@@ -2,48 +2,109 @@
 require_once __DIR__ . '/edgar.php';
 
 /**
- * Analyze ownership type for a given CIK.
- * Uses 13D/13G filings (beneficial ownership) and DEF 14A (proxy) to determine
- * whether a company is family-owned or corporately owned.
+ * Known institutional investors — presence indicates corporate ownership.
  */
-function analyze_ownership(string $cik): array {
-    $owners = [];
+const INSTITUTIONS = [
+    'vanguard', 'blackrock', 'state street', 'fidelity', 'invesco',
+    'dimensional', 'northern trust', 't. rowe', 'capital group',
+    'geode', 'bank of america', 'morgan stanley', 'wells fargo',
+    'jpmorgan', 'goldman sachs', 'schwab', 'pimco', 'american funds',
+];
 
-    // Pull latest DEF 14A (proxy statement) — contains insider/director ownership
-    $proxy_filings = edgar_get_filings($cik, 'DEF 14A', 1);
-    // Pull 13D/13G filings — beneficial ownership by 5%+ holders
-    $filings_13d = edgar_get_filings($cik, 'SC 13D', 3);
-    $filings_13g = edgar_get_filings($cik, 'SC 13G', 3);
+/**
+ * Known family / individual ownership indicators.
+ */
+const FAMILY_SIGNALS = [
+    'family', 'trust', 'foundation', 'estate', 'partners lp',
+    'holdings llc', 'enterprises', 'revocable', 'living trust',
+];
 
-    // For now, use the company facts endpoint for ownership data
-    $padded = str_pad($cik, 10, '0', STR_PAD_LEFT);
-    $facts = edgar_get(EDGAR_DATA . "/api/xbrl/companyfacts/CIK{$padded}.json");
+/**
+ * Analyze whether a company is family-owned or corporately owned.
+ *
+ * @return array {type, label, summary, owners, confidence}
+ */
+function analyze_ownership(string $cik, array $company): array {
+    $name    = $company['name'];
+    $owners  = [];
+    $signals = ['family' => 0, 'corporate' => 0];
 
-    // Determine ownership type heuristically
-    // A company is considered family-owned if:
-    // - Insiders hold >20% collectively, OR
-    // - A single individual/family holds >50%
-    $insider_pct = extract_insider_ownership($facts);
-    $type = $insider_pct >= 20 ? 'family' : 'corporate';
+    // 1. Fetch beneficial owners (13D/13G filers)
+    try {
+        $beneficial = edgar_get_beneficial_owners($cik, $name);
+        foreach ($beneficial as $bo) {
+            $lower = strtolower($bo['name']);
+            $type  = classify_owner($lower);
+            $signals[$type]++;
+            $owners[] = [
+                'name' => $bo['name'],
+                'type' => $type,
+                'role' => '13D/13G Filer (≥5% owner)',
+                'pct'  => null,
+            ];
+        }
+    } catch (Exception $e) {
+        // continue with other signals
+    }
 
-    $summary = $type === 'family'
-        ? "Insiders and founding shareholders hold approximately {$insider_pct}% of shares, suggesting significant family or founder control."
-        : "Ownership appears to be primarily institutional or widely distributed, characteristic of a corporately structured company.";
+    // 2. Category signal from EDGAR
+    $category = strtolower($company['category'] ?? '');
+    if (str_contains($category, 'non-accelerated') || str_contains($category, 'smaller reporting')) {
+        $signals['family'] += 1; // smaller companies more likely family
+    }
+
+    // 3. SIC-based heuristic (certain industries skew family)
+    $sic = (int)($company['sic'] ?? 0);
+    if (($sic >= 5200 && $sic <= 5999) || ($sic >= 7000 && $sic <= 7999)) {
+        $signals['family'] += 1; // retail/hospitality skew family
+    }
+
+    // Determine verdict
+    if ($signals['family'] > $signals['corporate']) {
+        $type = 'family';
+    } elseif ($signals['corporate'] > $signals['family']) {
+        $type = 'corporate';
+    } else {
+        // Default: check if it's a large cap (likely corporate)
+        $type = (!empty($company['exchanges'])) ? 'corporate' : 'unknown';
+    }
+
+    $summary = build_summary($type, $name, $owners, $company);
 
     return [
-        'type'    => $type,
-        'summary' => $summary,
-        'owners'  => $owners,
-        'insider_pct' => $insider_pct,
+        'type'       => $type,
+        'label'      => $type === 'family' ? 'Family / Founder Owned' : ($type === 'corporate' ? 'Corporately Owned' : 'Ownership Unclear'),
+        'summary'    => $summary,
+        'owners'     => array_slice($owners, 0, 10),
+        'confidence' => max($signals['family'], $signals['corporate']) > 2 ? 'high' : 'moderate',
     ];
 }
 
-function extract_insider_ownership(array $facts): float {
-    // Try to find insider ownership percentage from XBRL facts
-    $us_gaap = $facts['facts']['us-gaap'] ?? [];
-    $dei     = $facts['facts']['dei'] ?? [];
+function classify_owner(string $lower_name): string {
+    foreach (INSTITUTIONS as $inst) {
+        if (str_contains($lower_name, $inst)) return 'corporate';
+    }
+    foreach (FAMILY_SIGNALS as $sig) {
+        if (str_contains($lower_name, $sig)) return 'family';
+    }
+    // Likely an individual if it looks like a person's name (contains comma or common name patterns)
+    if (preg_match('/\b(mr|mrs|ms|dr|jr|sr|ii|iii)\b/i', $lower_name)) return 'family';
+    return 'corporate'; // default to corporate for unknown entities
+}
 
-    // EntityCommonStockSharesOutstanding vs insider held shares
-    // This is a simplified heuristic — full implementation would parse proxy XML
-    return 0.0;
+function build_summary(string $type, string $name, array $owners, array $company): string {
+    $inst_owners    = array_filter($owners, fn($o) => $o['type'] === 'corporate');
+    $family_owners  = array_filter($owners, fn($o) => $o['type'] === 'family');
+    $inst_names     = array_map(fn($o) => $o['name'], array_slice(array_values($inst_owners), 0, 3));
+    $family_names   = array_map(fn($o) => $o['name'], array_slice(array_values($family_owners), 0, 2));
+
+    if ($type === 'family') {
+        $who = !empty($family_names) ? implode(', ', $family_names) : 'individual insiders or a founding family';
+        return "{$name} appears to be controlled by {$who}, based on SEC beneficial ownership filings. Family or individual shareholders hold significant voting power.";
+    } elseif ($type === 'corporate') {
+        $who = !empty($inst_names) ? implode(', ', $inst_names) : 'large institutional investors';
+        return "{$name} is primarily owned by institutional shareholders including {$who}. Ownership is broadly distributed among investment firms and funds with no single controlling individual.";
+    } else {
+        return "Ownership structure for {$name} could not be definitively determined from available SEC filings. The company may be private or have limited public disclosure requirements.";
+    }
 }
