@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /includes/
+Disallow: /data/
+
+Sitemap: https://arewecorp.com/sitemap.xml
