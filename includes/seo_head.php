@@ -26,6 +26,9 @@ function seo_head(array $seo): void {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
+    <!-- Google Search Console -->
+    <meta name="google-site-verification" content="QJfBhBKPcBaoTFytO8uffvlTcI4kJ5YeljjSNzE8Z5g">
+
     <!-- Primary SEO -->
     <title><?= $title ?></title>
     <meta name="description" content="<?= $desc ?>">
