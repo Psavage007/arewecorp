@@ -24,47 +24,80 @@ function edgar_get(string $url, bool $xml = false) {
 }
 
 /**
- * Search companies by name using EDGAR company browse (Atom feed).
- * This searches actual company names, not filing text.
+ * Search companies by name.
+ * Primary: company_tickers.json (cached locally, covers all public companies).
+ * Fallback: EDGAR Atom feed for non-ticker companies (limited to 5 results).
  */
 function edgar_search_companies(string $query, int $limit = 40): array {
-    $url = EDGAR_BROWSE
-         . '?company=' . urlencode($query)
-         . '&action=getcompany&type=10-K&dateb=&owner=include&count=' . $limit
-         . '&output=atom';
+    $results = [];
+    $seen    = [];
+    $q_lower = strtolower(trim($query));
 
-    $xml_str = edgar_get($url, true);
-
-    // Parse CIKs from the Atom feed
-    $ciks = [];
-    if (preg_match_all('/urn:tag:www\.sec\.gov:cik=(\d+)/', $xml_str, $m)) {
-        $ciks = array_unique($m[1]);
+    // --- Primary: search local ticker cache ---
+    $ticker_data = edgar_get_tickers_cached();
+    foreach ($ticker_data as $entry) {
+        if (str_contains(strtolower($entry['title']), $q_lower)) {
+            $cik = (string)$entry['cik_str'];
+            if (isset($seen[$cik])) continue;
+            $seen[$cik] = true;
+            $results[]  = ['name' => $entry['title'], 'cik' => $cik];
+            if (count($results) >= $limit) return $results;
+        }
     }
 
-    if (empty($ciks)) return [];
-
-    // Fetch company names from submissions API (batch up to 15)
-    $results = [];
-    foreach (array_slice($ciks, 0, 15) as $raw_cik) {
-        $cik    = ltrim($raw_cik, '0');
-        $padded = str_pad($cik, 10, '0', STR_PAD_LEFT);
+    // --- Fallback: Atom feed for non-public/non-ticker companies ---
+    if (count($results) < 10) {
         try {
-            $sub = edgar_get(EDGAR_DATA . "/submissions/CIK{$padded}.json");
-            if (!empty($sub['name'])) {
-                $results[] = [
-                    'name'     => $sub['name'],
-                    'cik'      => $cik,
-                    'sic_desc' => $sub['sicDescription'] ?? '',
-                    'state'    => $sub['stateOfIncorporation'] ?? '',
-                    'tickers'  => $sub['tickers'] ?? [],
-                ];
+            $url     = EDGAR_BROWSE
+                     . '?company=' . urlencode($query)
+                     . '&action=getcompany&type=&dateb=&owner=include&count=10&output=atom';
+            $xml_str = edgar_get($url, true);
+            $ciks    = [];
+            if (preg_match_all('/urn:tag:www\.sec\.gov:cik=(\d+)/', $xml_str, $m)) {
+                $ciks = array_unique($m[1]);
+            }
+            foreach (array_slice($ciks, 0, 5) as $raw_cik) {
+                $cik = ltrim($raw_cik, '0') ?: '0';
+                if (isset($seen[$cik])) continue;
+                $seen[$cik] = true;
+                $padded = str_pad($cik, 10, '0', STR_PAD_LEFT);
+                $sub    = edgar_get(EDGAR_DATA . "/submissions/CIK{$padded}.json");
+                if (!empty($sub['name'])) {
+                    $results[] = ['name' => $sub['name'], 'cik' => $cik];
+                }
             }
         } catch (Exception $e) {
-            // skip this CIK
+            // fallback failed, return what we have
         }
     }
 
     return $results;
+}
+
+/**
+ * Load and cache EDGAR's full public company ticker list.
+ * File is ~3MB — cached locally for 24 hours.
+ */
+function edgar_get_tickers_cached(): array {
+    $cache_file = sys_get_temp_dir() . '/edgar_tickers.json';
+    $max_age    = 86400; // 24 hours
+
+    if (file_exists($cache_file) && (time() - filemtime($cache_file)) < $max_age) {
+        $data = json_decode(file_get_contents($cache_file), true);
+        if ($data) return $data;
+    }
+
+    $ctx = stream_context_create(['http' => [
+        'header'  => "User-Agent: " . EDGAR_UA . "\r\n",
+        'timeout' => 20,
+    ]]);
+    $body = @file_get_contents('https://www.sec.gov/files/company_tickers.json', false, $ctx);
+    if (!$body) return [];
+
+    $raw  = json_decode($body, true) ?? [];
+    $data = array_values($raw); // strip numeric keys
+    file_put_contents($cache_file, json_encode($data));
+    return $data;
 }
 
 /**

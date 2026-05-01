@@ -10,6 +10,11 @@ $featured = require 'data/featured.php';
     <title>AreWeCorp — Who Owns That Company?</title>
     <meta name="description" content="Find out if any US company is family owned or corporately owned. Powered by SEC EDGAR data.">
     <link rel="stylesheet" href="assets/css/style.css">
+    <!-- Google Analytics -->
+    <?php if (($ga_id = getenv('GA_MEASUREMENT_ID')) !== false && $ga_id): ?>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=<?= htmlspecialchars($ga_id) ?>"></script>
+    <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','<?= htmlspecialchars($ga_id) ?>');</script>
+    <?php endif; ?>
 </head>
 <body>
 

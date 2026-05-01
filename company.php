@@ -34,6 +34,10 @@ $type     = $ownership['type'] ?? 'unknown';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $company ? htmlspecialchars($company['name']) : 'Company' ?> — AreWeCorp</title>
     <link rel="stylesheet" href="assets/css/style.css">
+    <?php if (($ga_id = getenv('GA_MEASUREMENT_ID')) !== false && $ga_id): ?>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=<?= htmlspecialchars($ga_id) ?>"></script>
+    <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','<?= htmlspecialchars($ga_id) ?>');</script>
+    <?php endif; ?>
 </head>
 <body>
 
